@@ -10,14 +10,18 @@ variable "kms_key_id" {
   type = string
 }
 
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
 # DynamoDB Table for Migration State
 resource "aws_dynamodb_table" "migration_state" {
-  name           = "${var.project_name}-migration-state"
-  billing_mode   = "PAY_PER_REQUEST"  # On-demand billing
-  hash_key       = "migrationId"
-  stream_specification {
-    stream_view_type = "NEW_AND_OLD_IMAGES"
-  }
+  name         = "${var.project_name}-migration-state"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "migrationId"
+
+  # Streams (replace stream_specification block)
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
 
   attribute {
     name = "migrationId"
@@ -39,7 +43,18 @@ resource "aws_dynamodb_table" "migration_state" {
     type = "S"
   }
 
-  # Global Secondary Index for querying by wave
+  # Needed because you use it as a GSI range_key
+  attribute {
+    name = "updatedAt"
+    type = "S"
+  }
+
+  # (Optional but recommended) define TTL attribute as well
+  attribute {
+    name = "expiresAt"
+    type = "N"
+  }
+
   global_secondary_index {
     name            = "wave-status-index"
     hash_key        = "wave"
@@ -47,7 +62,6 @@ resource "aws_dynamodb_table" "migration_state" {
     projection_type = "ALL"
   }
 
-  # Global Secondary Index for querying by app
   global_secondary_index {
     name            = "app-status-index"
     hash_key        = "appName"
@@ -55,7 +69,6 @@ resource "aws_dynamodb_table" "migration_state" {
     projection_type = "ALL"
   }
 
-  # Global Secondary Index for querying by status
   global_secondary_index {
     name            = "status-timestamp-index"
     hash_key        = "status"
@@ -70,7 +83,7 @@ resource "aws_dynamodb_table" "migration_state" {
 
   server_side_encryption {
     enabled     = true
-    kms_key_arn = "arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/${var.kms_key_id}"
+    kms_key_arn = "arn:aws:kms:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:key/${var.kms_key_id}"
   }
 
   point_in_time_recovery {
@@ -81,10 +94,6 @@ resource "aws_dynamodb_table" "migration_state" {
     Name = "${var.project_name}-migration-state"
   }
 }
-
-# Data sources for current AWS account and region
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
 
 # CloudWatch Alarms for DynamoDB
 resource "aws_cloudwatch_metric_alarm" "dynamodb_read_throttle" {
