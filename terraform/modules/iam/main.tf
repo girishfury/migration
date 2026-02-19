@@ -26,7 +26,8 @@ resource "aws_iam_role" "lambda_execution" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Principal" = {
+        Effect = "Allow"
+        Principal = {
           Service = "lambda.amazonaws.com"
         }
         Action = "sts:AssumeRole"
