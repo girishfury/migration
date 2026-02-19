@@ -1,0 +1,420 @@
+name: Deploy Migration Orchestration Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: "1.5.0"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Cache Terraform
+        uses: actions/cache@v3
+        with:
+          path: terraform/.terraform
+          key: ${{ runner.os }}-terraform-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+      
+      - name: Validate Terraform
+        run: |
+          cd terraform
+          terraform init -backend=false
+          terraform validate
+          terraform fmt -check
+      
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r lambdas/requirements.txt
+          pip install pytest pytest-cov flake8
+      
+      - name: Lint Python code
+        run: |
+          flake8 lambdas/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 lambdas/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      
+      - name: Run unit tests
+        run: |
+          cd lambdas
+          pytest tests/ -v --cov=. --cov-report=xml
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./lambdas/coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
+
+  plan:
+    name: Plan Terraform
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/develop'
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-migration-plan
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Cache Terraform
+        uses: actions/cache@v3
+        with:
+          path: terraform/.terraform
+          key: ${{ runner.os }}-terraform-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+      
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+      
+      - name: Terraform Plan (Dev)
+        if: github.ref == 'refs/heads/develop'
+        run: |
+          cd terraform
+          terraform plan \
+            -var-file="environments/dev.tfvars" \
+            -out=tfplan
+      
+      - name: Terraform Plan (Prod)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cd terraform
+          terraform plan \
+            -var-file="environments/prod.tfvars" \
+            -out=tfplan
+      
+      - name: Upload plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 7
+      
+      - name: Comment PR with plan
+        if: github.event_name == 'pull_request'
+        uses: terraform-linters/tflint-load-config-action@v3
+        with:
+          format: github-comment
+
+  build-lambdas:
+    name: Build Lambda Functions
+    runs-on: ubuntu-latest
+    needs: validate
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Create Lambda package
+        run: |
+          mkdir -p lambda-packages
+          
+          # Build ingress handler
+          mkdir -p build/ingress_handler
+          cp lambdas/ingress_handler.py build/ingress_handler/
+          cp -r lambdas/common build/ingress_handler/
+          cp -r lambdas/schemas build/ingress_handler/
+          pip install -r lambdas/requirements.txt -t build/ingress_handler/ --quiet
+          cd build/ingress_handler && zip -r ../../lambda-packages/ingress_handler.zip . && cd ../..
+          
+          # Build validate input
+          mkdir -p build/validate_input
+          cp lambdas/validate_input.py build/validate_input/
+          cp -r lambdas/common build/validate_input/
+          cp -r lambdas/schemas build/validate_input/
+          pip install -r lambdas/requirements.txt -t build/validate_input/ --quiet
+          cd build/validate_input && zip -r ../../lambda-packages/validate_input.zip . && cd ../..
+          
+          # Build prepare source
+          mkdir -p build/prepare_source
+          cp lambdas/prepare_source.py build/prepare_source/
+          cp -r lambdas/common build/prepare_source/
+          pip install -r lambdas/requirements.txt -t build/prepare_source/ --quiet
+          cd build/prepare_source && zip -r ../../lambda-packages/prepare_source.zip . && cd ../..
+          
+          # Build trigger migration
+          mkdir -p build/trigger_migration
+          cp lambdas/trigger_migration.py build/trigger_migration/
+          cp -r lambdas/common build/trigger_migration/
+          pip install -r lambdas/requirements.txt -t build/trigger_migration/ --quiet
+          cd build/trigger_migration && zip -r ../../lambda-packages/trigger_migration.zip . && cd ../..
+          
+          # Build verify migration
+          mkdir -p build/verify_migration
+          cp lambdas/verify_migration.py build/verify_migration/
+          cp -r lambdas/common build/verify_migration/
+          pip install -r lambdas/requirements.txt -t build/verify_migration/ --quiet
+          cd build/verify_migration && zip -r ../../lambda-packages/verify_migration.zip . && cd ../..
+          
+          # Build finalize cutover
+          mkdir -p build/finalize_cutover
+          cp lambdas/finalize_cutover.py build/finalize_cutover/
+          cp -r lambdas/common build/finalize_cutover/
+          pip install -r lambdas/requirements.txt -t build/finalize_cutover/ --quiet
+          cd build/finalize_cutover && zip -r ../../lambda-packages/finalize_cutover.zip . && cd ../..
+          
+          # Build callback handler
+          mkdir -p build/callback_handler
+          cp lambdas/callback_handler.py build/callback_handler/
+          cp -r lambdas/common build/callback_handler/
+          pip install -r lambdas/requirements.txt -t build/callback_handler/ --quiet
+          cd build/callback_handler && zip -r ../../lambda-packages/callback_handler.zip . && cd ../..
+          
+          # Build rollback handler
+          mkdir -p build/rollback_handler
+          cp lambdas/rollback_handler.py build/rollback_handler/
+          cp -r lambdas/common build/rollback_handler/
+          pip install -r lambdas/requirements.txt -t build/rollback_handler/ --quiet
+          cd build/rollback_handler && zip -r ../../lambda-packages/rollback_handler.zip . && cd ../..
+      
+      - name: Upload Lambda artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: lambda-packages
+          path: lambda-packages/
+          retention-days: 7
+
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: [plan, build-lambdas]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-migration-deploy-dev
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Download plan
+        uses: actions/download-artifact@v3
+        with:
+          name: tfplan
+          path: terraform/
+      
+      - name: Download Lambda artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: lambda-packages
+          path: lambda-packages/
+      
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+      
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply \
+            -auto-approve \
+            -var-file="environments/dev.tfvars" \
+            tfplan
+      
+      - name: Deploy Lambda Functions
+        run: |
+          # Get Lambda function names from Terraform
+          cd terraform
+          INGRESS_LAMBDA=$(terraform output -raw ingress_handler_function_name 2>/dev/null || echo "ingress-handler-dev")
+          
+          # Update Lambda code from artifacts
+          aws lambda update-function-code \
+            --function-name $INGRESS_LAMBDA \
+            --zip-file fileb://../lambda-packages/ingress_handler.zip || true
+          
+          # Repeat for other Lambda functions
+          for func in validate-input prepare-source trigger-migration verify-migration finalize-cutover callback-handler rollback-handler; do
+            aws lambda update-function-code \
+              --function-name $func-dev \
+              --zip-file fileb://../lambda-packages/${func/-/_}.zip || true
+          done
+      
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests..."
+          # Add smoke test commands here
+          aws stepfunctions describe-state-machine \
+            --state-machine-arn ${{ secrets.DEV_STATE_MACHINE_ARN }}
+
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [plan, build-lambdas]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-migration-deploy-prod
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Download plan
+        uses: actions/download-artifact@v3
+        with:
+          name: tfplan
+          path: terraform/
+      
+      - name: Download Lambda artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: lambda-packages
+          path: lambda-packages/
+      
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+      
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply \
+            -auto-approve \
+            -var-file="environments/prod.tfvars" \
+            tfplan
+      
+      - name: Deploy Lambda Functions
+        run: |
+          # Get Lambda function names from Terraform
+          cd terraform
+          INGRESS_LAMBDA=$(terraform output -raw ingress_handler_function_name 2>/dev/null || echo "ingress-handler-prod")
+          
+          # Update Lambda code from artifacts
+          aws lambda update-function-code \
+            --function-name $INGRESS_LAMBDA \
+            --zip-file fileb://../lambda-packages/ingress_handler.zip || true
+          
+          # Repeat for other Lambda functions
+          for func in validate-input prepare-source trigger-migration verify-migration finalize-cutover callback-handler rollback-handler; do
+            aws lambda update-function-code \
+              --function-name $func-prod \
+              --zip-file fileb://../lambda-packages/${func/-/_}.zip || true
+          done
+      
+      - name: Smoke tests
+        run: |
+          echo "Running production smoke tests..."
+          aws stepfunctions describe-state-machine \
+            --state-machine-arn ${{ secrets.PROD_STATE_MACHINE_ARN }}
+      
+      - name: Notify deployment
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          payload: |
+            {
+              "text": "Migration Orchestration deployment to production: ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "Migration Orchestration deployment to production: *${{ job.status }}*"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "${{ github.actor }} - <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>"
+                    }
+                  ]
+                }
+              ]
+            }
+
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: always()
+    
+    steps:
+      - name: Delete artifacts
+        uses: geekyeggo/delete-artifact@v2
+        with:
+          name: |
+            tfplan
+            lambda-packages

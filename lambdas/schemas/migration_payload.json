@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Migration Payload Schema",
+  "required": [
+    "migrationId",
+    "appName",
+    "source",
+    "target",
+    "environment",
+    "wave"
+  ],
+  "properties": {
+    "migrationId": {
+      "type": "string",
+      "pattern": "^mig-[a-zA-Z0-9]+$",
+      "description": "Unique migration identifier"
+    },
+    "appName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Application name"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["azure", "vmware", "physical"],
+      "description": "Source infrastructure type"
+    },
+    "target": {
+      "type": "string",
+      "enum": ["aws"],
+      "description": "Target cloud provider"
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["dev", "staging", "prod"],
+      "description": "Target environment"
+    },
+    "wave": {
+      "type": "string",
+      "pattern": "^wave-[0-9]+$",
+      "description": "Migration wave identifier"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["freeze", "replicate", "validate", "switch"]
+      },
+      "description": "Migration steps to execute"
+    },
+    "callbackUrl": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL for migration status callbacks"
+    },
+    "sourceVmId": {
+      "type": "string",
+      "description": "Source VM identifier in Azure/VMware"
+    },
+    "targetVmName": {
+      "type": "string",
+      "description": "Target VM name in AWS"
+    },
+    "instanceType": {
+      "type": "string",
+      "description": "AWS instance type for target"
+    },
+    "subnetId": {
+      "type": "string",
+      "description": "AWS subnet ID for target"
+    },
+    "securityGroupIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "AWS security group IDs"
+    },
+    "tags": {
+      "type": "object",
+      "description": "Resource tags"
+    }
+  },
+  "additionalProperties": false
+}
