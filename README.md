@@ -1,3 +1,9 @@
+sudo -i
+sudo dnf update -y
+sudo dnf install python3 python3-pip -y
+pip3 install boto3
+
+
 # Event-Driven Migration Orchestration Framework
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org)
