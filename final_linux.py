@@ -239,8 +239,10 @@ if __name__ == "__main__":
 
     test_event = {
         "instances": [
-            {"instance_id": "i-001cae3cc49f0db7a", "migration_id": "mig-123"},
-            {"instance_id": "i-0400143b15f319ac2", "migration_id": "mig-456"}
+            {"instance_id": "i-0a4c403c71250437b", "migration_id": "mig--linux"},
+            {"instance_id": "i-01d9138acd931d64a", "migration_id": "mig-123-debian"},
+            {"instance_id": "i-0294087641e2cadf2", "migration_id": "mig-123-ubuntu"},
+            {"instance_id": "i-022acf12a4d931521", "migration_id": "mig-123-redhat"}
 
         ]
     }
