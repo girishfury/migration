@@ -1,3 +1,6 @@
+#Aws Managed policy - AmazonSSMManagedInstanceCore 
+#custom policy
+
 {
     "Version": "2012-10-17",
     "Statement": [
